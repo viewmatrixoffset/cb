@@ -1,6 +1,5 @@
 local Decimals = 4
 local Clock = os.clock()
-local ValueText = "Value Is Now :"
 
 local library = loadstring(game:HttpGet("https://raw.githubusercontent.com/drillygzzly/Roblox-UI-Libs/main/1%20Tokyo%20Lib%20(FIXED)/Tokyo%20Lib%20Source.lua"))({
     cheatname = "Omni Services",
@@ -18,33 +17,178 @@ local Tab1 = Window1:AddTab(" Combat ")
 local VisualsTab = Window1:AddTab(" Visuals ")
 local SettingsTab = library:CreateSettingsTab(Window1)
 
--- services
+-- Services
 local Players = game:GetService("Players")
 local RunService = game:GetService("RunService")
 local UserInputService = game:GetService("UserInputService")
 local CoreGui = game:GetService("CoreGui")
+local Workspace = game:GetService("Workspace")
 local LocalPlayer = Players.LocalPlayer
+local Camera = Workspace.CurrentCamera
+local Mouse = LocalPlayer:GetMouse()
 
--- combat tab
+-- Combat Tab
 local CombatSection = Tab1:AddSection("Combat", 1)
 
--- triggerbot storage
-local TriggerbotEnabled = false
-local TriggerbotTeamCheck = true
-local TriggerbotDelay = 0
+-- Shared Team Check Variable
+local CombatTeamCheck = false
 
--- for tb, to check if we are looking at enemy
-local function IsLookingAtEnemy()
-    local camera = workspace.CurrentCamera
-    if not camera then return false end
+-- Triggerbot Variables
+local TriggerbotEnabled = false
+local TriggerbotDelay = 0
+local LastShot = 0
+local ShootCooldown = 0.1
+
+-- Aimbot Variables
+local AimbotEnabled = false
+local AimbotFOV = 150
+local AimbotSmoothing = 50
+local ShowFOVCircle = false
+local AimbotClosestPart = false
+local FOVCircle = nil
+
+-- Silent Aim Variables
+local SilentAimEnabled = false
+local SilentAimFOV = 100
+local SilentAimClosestPart = false
+
+-- Utility Functions
+local function GetCharacter(player)
+    return player and player.Character
+end
+
+local function GetHumanoid(character)
+    return character and character:FindFirstChildOfClass("Humanoid")
+end
+
+local function GetRootPart(character)
+    return character and (character:FindFirstChild("HumanoidRootPart") or character:FindFirstChild("Torso"))
+end
+
+local function IsAlive(character)
+    local humanoid = GetHumanoid(character)
+    return humanoid and humanoid.Health > 0
+end
+
+local function IsTeammate(player)
+    return LocalPlayer.Team and player.Team and player.Team == LocalPlayer.Team
+end
+
+local function GetClosestPartToMouse(character)
+    if not character then return nil end
     
-    local ray = Ray.new(camera.CFrame.Position, camera.CFrame.LookVector * 1000)
-    local hit = workspace:FindPartOnRayWithIgnoreList(ray, {LocalPlayer.Character})
+    local closestPart = nil
+    local shortestDistance = math.huge
+    
+    local parts = {"Head", "UpperTorso", "LowerTorso", "HumanoidRootPart"}
+    
+    for _, partName in ipairs(parts) do
+        local part = character:FindFirstChild(partName)
+        if part then
+            local screenPos, onScreen = Camera:WorldToViewportPoint(part.Position)
+            if onScreen then
+                local mousePos = Vector2.new(Mouse.X, Mouse.Y)
+                local distance = (Vector2.new(screenPos.X, screenPos.Y) - mousePos).Magnitude
+                
+                if distance < shortestDistance then
+                    shortestDistance = distance
+                    closestPart = part
+                end
+            end
+        end
+    end
+    
+    return closestPart
+end
+
+local function GetClosestPlayerInFOV(fov, teamCheck, useClosestPart)
+    local closestPlayer = nil
+    local shortestDistance = fov or math.huge
+    local mousePos = Vector2.new(Mouse.X, Mouse.Y)
+    
+    for _, player in ipairs(Players:GetPlayers()) do
+        if player ~= LocalPlayer then
+            local character = GetCharacter(player)
+            if character and IsAlive(character) then
+                if not teamCheck or not IsTeammate(player) then
+                    local targetPart = useClosestPart and GetClosestPartToMouse(character) or character:FindFirstChild("Head")
+                    
+                    if not targetPart then
+                        targetPart = GetRootPart(character)
+                    end
+                    
+                    if targetPart then
+                        local screenPos, onScreen = Camera:WorldToViewportPoint(targetPart.Position)
+                        if onScreen then
+                            local distance = (Vector2.new(screenPos.X, screenPos.Y) - mousePos).Magnitude
+                            
+                            if distance < shortestDistance then
+                                shortestDistance = distance
+                                closestPlayer = {player = player, part = targetPart}
+                            end
+                        end
+                    end
+                end
+            end
+        end
+    end
+    
+    return closestPlayer
+end
+
+-- FOV Circle
+local function CreateFOVCircle()
+    if FOVCircle then
+        FOVCircle:Remove()
+    end
+    
+    FOVCircle = Drawing.new("Circle")
+    FOVCircle.Transparency = 1
+    FOVCircle.Thickness = 2
+    FOVCircle.Color = Color3.fromRGB(255, 255, 255)
+    FOVCircle.NumSides = 64
+    FOVCircle.Radius = AimbotFOV
+    FOVCircle.Filled = false
+    FOVCircle.Visible = ShowFOVCircle and AimbotEnabled
+    FOVCircle.Position = Vector2.new(Mouse.X, Mouse.Y + 36)
+end
+
+CreateFOVCircle()
+
+-- Update FOV Circle
+RunService.RenderStepped:Connect(function()
+    if FOVCircle then
+        FOVCircle.Position = Vector2.new(Mouse.X, Mouse.Y + 36)
+        FOVCircle.Radius = AimbotFOV
+        FOVCircle.Visible = ShowFOVCircle and AimbotEnabled
+    end
+end)
+
+-- Shared Team Check Toggle (at the top)
+CombatSection:AddToggle({
+    text = "Team Check",
+    state = false,
+    tooltip = "Don't target teammates (applies to all combat features)",
+    flag = "Combat_TeamCheck",
+    risky = false,
+    callback = function(v)
+        CombatTeamCheck = v
+    end
+})
+
+CombatSection:AddSeparator({enabled = true, text = "Triggerbot"})
+
+-- Triggerbot Function
+local function IsLookingAtEnemy()
+    if not Camera then return false end
+    
+    local ray = Ray.new(Camera.CFrame.Position, Camera.CFrame.LookVector * 1000)
+    local hit = Workspace:FindPartOnRayWithIgnoreList(ray, {GetCharacter(LocalPlayer)})
     
     if hit then
         local targetPlayer = Players:GetPlayerFromCharacter(hit.Parent)
         if targetPlayer and targetPlayer ~= LocalPlayer then
-            if TriggerbotTeamCheck and LocalPlayer.Team and targetPlayer.Team == LocalPlayer.Team then
+            if CombatTeamCheck and IsTeammate(targetPlayer) then
                 return false
             end
             return true
@@ -53,8 +197,8 @@ local function IsLookingAtEnemy()
     return false
 end
 
--- triggerbot buttons
-CombatSection:AddToggle({
+-- Triggerbot Toggle
+local TriggerbotToggle = CombatSection:AddToggle({
     text = "Triggerbot",
     state = false,
     tooltip = "Automatically shoot when aiming at enemy",
@@ -62,42 +206,22 @@ CombatSection:AddToggle({
     risky = true,
     callback = function(v)
         TriggerbotEnabled = v
-        print("Triggerbot:", v)
     end
-}):AddBind({
+})
+
+TriggerbotToggle:AddBind({
     enabled = true,
-    text = "Toggle Key",
+    text = "Triggerbot",
     tooltip = "Key to toggle triggerbot on/off",
     mode = "toggle",
     bind = "None",
     flag = "Triggerbot_Toggle",
-    state = false,
-    nomouse = false,
-    risky = false,
-    noindicator = false,
     callback = function(v)
-        TriggerbotEnabled = v
-        print("Triggerbot toggled:", v)
-    end,
-    keycallback = function(v)
-        print("Triggerbot key set to:", v)
+        TriggerbotEnabled = not TriggerbotEnabled
+        TriggerbotToggle:SetState(TriggerbotEnabled)
     end
 })
 
--- team check for tb
-CombatSection:AddToggle({
-    text = "Team Check",
-    state = true,
-    tooltip = "Don't shoot teammates",
-    flag = "Triggerbot_TeamCheck",
-    risky = false,
-    callback = function(v)
-        TriggerbotTeamCheck = v
-        print("Triggerbot Team Check:", v)
-    end
-})
-
--- tb delay slider
 CombatSection:AddSlider({
     enabled = true,
     text = "Trigger Delay",
@@ -105,21 +229,16 @@ CombatSection:AddSlider({
     flag = "Triggerbot_Delay",
     suffix = "ms",
     dragging = true,
-    focused = false,
     min = 0,
     max = 500,
     increment = 10,
     risky = false,
     callback = function(v)
         TriggerbotDelay = v
-        print("Triggerbot Delay:", v)
     end
 })
 
--- triggerbot logic
-local LastShot = 0
-local ShootCooldown = 0.1
-
+-- Triggerbot Logic
 RunService.RenderStepped:Connect(function()
     if not TriggerbotEnabled then return end
     
@@ -137,13 +256,164 @@ RunService.RenderStepped:Connect(function()
     end
 end)
 
--- visuals tab
+-- Aimbot Section
+CombatSection:AddSeparator({enabled = true, text = "Aimbot"})
+
+local AimbotToggle = CombatSection:AddToggle({
+    text = "Aimbot",
+    state = false,
+    tooltip = "Automatic aim assistance",
+    flag = "Aimbot_Enabled",
+    risky = true,
+    callback = function(v)
+        AimbotEnabled = v
+        if FOVCircle then
+            FOVCircle.Visible = ShowFOVCircle and v
+        end
+    end
+})
+
+AimbotToggle:AddBind({
+    enabled = true,
+    text = "Aimbot",
+    tooltip = "Key to toggle aimbot",
+    mode = "toggle",
+    bind = "None",
+    flag = "Aimbot_Toggle",
+    callback = function(v)
+        AimbotEnabled = not AimbotEnabled
+        AimbotToggle:SetState(AimbotEnabled)
+        if FOVCircle then
+            FOVCircle.Visible = ShowFOVCircle and AimbotEnabled
+        end
+    end
+})
+
+CombatSection:AddToggle({
+    text = "Target Closest Part",
+    state = false,
+    tooltip = "Aim at closest visible part instead of head",
+    flag = "Aimbot_ClosestPart",
+    risky = false,
+    callback = function(v)
+        AimbotClosestPart = v
+    end
+})
+
+CombatSection:AddToggle({
+    text = "Show FOV Circle",
+    state = false,
+    tooltip = "Display FOV circle",
+    flag = "Aimbot_ShowFOV",
+    risky = false,
+    callback = function(v)
+        ShowFOVCircle = v
+        if FOVCircle then
+            FOVCircle.Visible = v and AimbotEnabled
+        end
+    end
+})
+
+CombatSection:AddSlider({
+    enabled = true,
+    text = "FOV Size",
+    tooltip = "Field of view for aimbot",
+    flag = "Aimbot_FOV",
+    suffix = "px",
+    dragging = true,
+    min = 50,
+    max = 500,
+    increment = 10,
+    risky = false,
+    callback = function(v)
+        AimbotFOV = v
+        if FOVCircle then
+            FOVCircle.Radius = v
+        end
+    end
+})
+
+CombatSection:AddSlider({
+    enabled = true,
+    text = "Aimbot Smoothing",
+    tooltip = "Aim smoothness (lower = faster snap, higher = smoother/legit)",
+    flag = "Aimbot_Smoothing",
+    suffix = "",
+    dragging = true,
+    min = 1,
+    max = 100,
+    increment = 1,
+    risky = false,
+    callback = function(v)
+        AimbotSmoothing = v
+    end
+})
+
+-- Aimbot Logic
+local AimbotConnection = RunService.RenderStepped:Connect(function()
+    if not AimbotEnabled then return end
+    
+    local target = GetClosestPlayerInFOV(AimbotFOV, CombatTeamCheck, AimbotClosestPart)
+    
+    if target and target.part then
+        local targetPos = target.part.Position
+        local cameraCFrame = Camera.CFrame
+        local targetCFrame = CFrame.new(cameraCFrame.Position, targetPos)
+        
+        local lerpAlpha = 1 / AimbotSmoothing
+        
+        Camera.CFrame = cameraCFrame:Lerp(targetCFrame, lerpAlpha)
+    end
+end)
+
+-- Silent Aim Section
+CombatSection:AddSeparator({enabled = true, text = "Silent Aim"})
+
+CombatSection:AddToggle({
+    text = "Silent Aim",
+    state = false,
+    tooltip = "Automatic hit registration",
+    flag = "SilentAim_Enabled",
+    risky = true,
+    callback = function(v)
+        SilentAimEnabled = v
+    end
+})
+
+CombatSection:AddToggle({
+    text = "Target Closest Part",
+    state = false,
+    tooltip = "Target closest visible part instead of head",
+    flag = "SilentAim_ClosestPart",
+    risky = false,
+    callback = function(v)
+        SilentAimClosestPart = v
+    end
+})
+
+CombatSection:AddSlider({
+    enabled = true,
+    text = "FOV Size",
+    tooltip = "Field of view for silent aim",
+    flag = "SilentAim_FOV",
+    suffix = "px",
+    dragging = true,
+    min = 50,
+    max = 500,
+    increment = 10,
+    risky = false,
+    callback = function(v)
+        SilentAimFOV = v
+    end
+})
+
+-- Visuals Tab
 local VisualsSection = VisualsTab:AddSection("ESP Settings", 1)
 
--- esp variables (cache & variables)
-local Highlights = {} -- cache
-local BoxESPs = {} -- cache
-local HealthBars = {} -- cache
+-- ESP Variables
+local Highlights = {}
+local BoxESPs = {}
+local HealthBars = {}
 local HighlightEnabled = false
 local BoxESPEnabled = false
 local HealthESPEnabled = false
@@ -151,14 +421,9 @@ local TeamCheckEnabled = false
 local EnemyColor = Color3.fromRGB(255, 0, 0)
 local TeamColor = Color3.fromRGB(0, 255, 0)
 
--- chams
+-- Highlight Functions
 local function CreateHighlight(character)
-    if not character then return end
-    
-    if Highlights[character] then
-        pcall(function() Highlights[character]:Destroy() end)
-        Highlights[character] = nil
-    end
+    if not character or Highlights[character] then return end
     
     local success, highlight = pcall(function()
         local h = Instance.new("Highlight")
@@ -174,9 +439,7 @@ local function CreateHighlight(character)
     
     if success and highlight then
         Highlights[character] = highlight
-        return highlight
     end
-    return nil
 end
 
 local function RemoveHighlight(character)
@@ -188,56 +451,53 @@ end
 
 local function UpdateAllHighlights()
     if not HighlightEnabled then
-        for char, highlight in pairs(Highlights) do
+        for _, highlight in pairs(Highlights) do
             pcall(function() highlight:Destroy() end)
         end
         Highlights = {}
         return
     end
     
-    for _, player in pairs(Players:GetPlayers()) do
+    for _, player in ipairs(Players:GetPlayers()) do
         if player ~= LocalPlayer then
-            local isTeammate = TeamCheckEnabled and LocalPlayer.Team and player.Team and player.Team == LocalPlayer.Team
+            local character = GetCharacter(player)
+            local isTeammate = TeamCheckEnabled and IsTeammate(player)
             
             if isTeammate then
-                if player.Character then RemoveHighlight(player.Character) end
-            else
-                local character = player.Character
-                if character and character:FindFirstChild("HumanoidRootPart") then
-                    local highlight = Highlights[character]
-                    if not highlight or not highlight.Parent then
-                        highlight = CreateHighlight(character)
-                    end
-                    if highlight then highlight.FillColor = EnemyColor end
-                else
-                    RemoveHighlight(character)
+                RemoveHighlight(character)
+            elseif character and IsAlive(character) then
+                local highlight = Highlights[character]
+                if not highlight or not highlight.Parent then
+                    CreateHighlight(character)
+                    highlight = Highlights[character]
                 end
+                if highlight then
+                    highlight.FillColor = EnemyColor
+                end
+            else
+                RemoveHighlight(character)
             end
         end
     end
 end
 
--- box esp
+-- Box ESP Functions
 local function CreateBoxESP(player)
     if BoxESPs[player] then
         for _, v in pairs(BoxESPs[player]) do pcall(function() v:Remove() end) end
     end
     
-    local box = {
-        TL = Drawing.new("Line"), TR = Drawing.new("Line"),
-        BL = Drawing.new("Line"), BR = Drawing.new("Line"),
-        L = Drawing.new("Line"), R = Drawing.new("Line"),
-        T = Drawing.new("Line"), B = Drawing.new("Line")
-    }
+    local box = {}
+    local parts = {"TL", "TR", "BL", "BR", "L", "R", "T", "B"}
     
-    for _, line in pairs(box) do
-        line.Visible = false
-        line.Thickness = 2
-        line.Transparency = 1
+    for _, part in ipairs(parts) do
+        box[part] = Drawing.new("Line")
+        box[part].Visible = false
+        box[part].Thickness = 2
+        box[part].Transparency = 1
     end
     
     BoxESPs[player] = box
-    return box
 end
 
 local function RemoveBoxESP(player)
@@ -248,21 +508,19 @@ local function RemoveBoxESP(player)
 end
 
 local function UpdateBoxESP(player, box)
-    local character = player.Character
-    if not character or not character:FindFirstChild("HumanoidRootPart") or not character:FindFirstChild("Humanoid") then
+    local character = GetCharacter(player)
+    if not character or not IsAlive(character) then
         for _, line in pairs(box) do line.Visible = false end
         return
     end
     
-    local humanoid = character.Humanoid
-    if humanoid.Health <= 0 then
+    local rootPart = GetRootPart(character)
+    if not rootPart then
         for _, line in pairs(box) do line.Visible = false end
         return
     end
     
-    local camera = workspace.CurrentCamera
-    local hrp = character.HumanoidRootPart
-    local rootPos, onScreen = camera:WorldToViewportPoint(hrp.Position)
+    local rootPos, onScreen = Camera:WorldToViewportPoint(rootPart.Position)
     
     if not onScreen then
         for _, line in pairs(box) do line.Visible = false end
@@ -270,8 +528,8 @@ local function UpdateBoxESP(player, box)
     end
     
     local head = character:FindFirstChild("Head")
-    local headPos = head and camera:WorldToViewportPoint(head.Position + Vector3.new(0, 0.5, 0)) or rootPos
-    local legPos = camera:WorldToViewportPoint(hrp.Position - Vector3.new(0, 3, 0))
+    local headPos = head and Camera:WorldToViewportPoint(head.Position + Vector3.new(0, 0.5, 0)) or rootPos
+    local legPos = Camera:WorldToViewportPoint(rootPart.Position - Vector3.new(0, 3, 0))
     
     local height = math.abs(headPos.Y - legPos.Y)
     local width = height * 0.5
@@ -295,7 +553,7 @@ local function UpdateBoxESP(player, box)
     end
 end
 
--- health ESP
+-- Health ESP Functions
 local function CreateHealthBar(player)
     if HealthBars[player] then
         for _, v in pairs(HealthBars[player]) do pcall(function() v:Remove() end) end
@@ -322,7 +580,6 @@ local function CreateHealthBar(player)
     healthBar.Text.Outline = true
     
     HealthBars[player] = healthBar
-    return healthBar
 end
 
 local function RemoveHealthBar(player)
@@ -333,24 +590,25 @@ local function RemoveHealthBar(player)
 end
 
 local function UpdateHealthBar(player, healthBar)
-    local character = player.Character
-    if not character or not character:FindFirstChild("HumanoidRootPart") or not character:FindFirstChild("Humanoid") then
+    local character = GetCharacter(player)
+    local humanoid = GetHumanoid(character)
+    
+    if not character or not humanoid or humanoid.Health <= 0 then
         healthBar.Outline.Visible = false
         healthBar.Bar.Visible = false
         healthBar.Text.Visible = false
         return
     end
     
-    local humanoid = character.Humanoid
-    if humanoid.Health <= 0 then
+    local rootPart = GetRootPart(character)
+    if not rootPart then
         healthBar.Outline.Visible = false
         healthBar.Bar.Visible = false
         healthBar.Text.Visible = false
         return
     end
     
-    local camera = workspace.CurrentCamera
-    local rootPos, onScreen = camera:WorldToViewportPoint(character.HumanoidRootPart.Position)
+    local rootPos, onScreen = Camera:WorldToViewportPoint(rootPart.Position)
     
     if not onScreen then
         healthBar.Outline.Visible = false
@@ -360,8 +618,8 @@ local function UpdateHealthBar(player, healthBar)
     end
     
     local head = character:FindFirstChild("Head")
-    local headPos = head and camera:WorldToViewportPoint(head.Position + Vector3.new(0, 0.5, 0)) or rootPos
-    local legPos = camera:WorldToViewportPoint(character.HumanoidRootPart.Position - Vector3.new(0, 3, 0))
+    local headPos = head and Camera:WorldToViewportPoint(head.Position + Vector3.new(0, 0.5, 0)) or rootPos
+    local legPos = Camera:WorldToViewportPoint(rootPart.Position - Vector3.new(0, 3, 0))
     
     local height = math.abs(headPos.Y - legPos.Y)
     local barWidth = 4
@@ -384,7 +642,7 @@ local function UpdateHealthBar(player, healthBar)
     healthBar.Text.Visible = true
 end
 
--- visuals toggles
+-- Visuals Toggles
 VisualsSection:AddToggle({
     text = "Highlight ESP",
     state = false,
@@ -393,7 +651,6 @@ VisualsSection:AddToggle({
     risky = false,
     callback = function(v)
         HighlightEnabled = v
-        print("Highlight ESP:", v)
         UpdateAllHighlights()
     end
 })
@@ -406,11 +663,10 @@ VisualsSection:AddToggle({
     risky = false,
     callback = function(v)
         BoxESPEnabled = v
-        print("Box ESP:", v)
         if not v then
-            for player, box in pairs(BoxESPs) do RemoveBoxESP(player) end
+            for player in pairs(BoxESPs) do RemoveBoxESP(player) end
         else
-            for _, player in pairs(Players:GetPlayers()) do
+            for _, player in ipairs(Players:GetPlayers()) do
                 if player ~= LocalPlayer then CreateBoxESP(player) end
             end
         end
@@ -425,11 +681,10 @@ VisualsSection:AddToggle({
     risky = false,
     callback = function(v)
         HealthESPEnabled = v
-        print("Health ESP:", v)
         if not v then
-            for player, bar in pairs(HealthBars) do RemoveHealthBar(player) end
+            for player in pairs(HealthBars) do RemoveHealthBar(player) end
         else
-            for _, player in pairs(Players:GetPlayers()) do
+            for _, player in ipairs(Players:GetPlayers()) do
                 if player ~= LocalPlayer then CreateHealthBar(player) end
             end
         end
@@ -444,7 +699,6 @@ VisualsSection:AddToggle({
     risky = false,
     callback = function(v)
         TeamCheckEnabled = v
-        print("ESP Team Check:", v)
         UpdateAllHighlights()
     end
 })
@@ -458,32 +712,14 @@ VisualsSection:AddColor({
     color = Color3.fromRGB(255, 0, 0),
     flag = "ESP_Enemy_Color",
     trans = 0,
-    open = false,
     risky = false,
     callback = function(v)
         EnemyColor = v
-        print("Enemy Color:", v)
         UpdateAllHighlights()
     end
 })
 
-VisualsSection:AddColor({
-    enabled = true,
-    text = "Team Color",
-    tooltip = "Color for teammates (all ESP)",
-    color = Color3.fromRGB(0, 255, 0),
-    flag = "ESP_Team_Color",
-    trans = 0,
-    open = false,
-    risky = false,
-    callback = function(v)
-        TeamColor = v
-        print("Team Color:", v)
-        UpdateAllHighlights()
-    end
-})
-
--- if a player leaves etc and to update their positions
+-- Event Handlers
 local function OnCharacterAdded(character)
     task.wait(0.1)
     if HighlightEnabled then UpdateAllHighlights() end
@@ -497,31 +733,33 @@ Players.PlayerAdded:Connect(function(player)
 end)
 
 Players.PlayerRemoving:Connect(function(player)
-    if player.Character then RemoveHighlight(player.Character) end
+    local character = GetCharacter(player)
+    if character then RemoveHighlight(character) end
     RemoveBoxESP(player)
     RemoveHealthBar(player)
 end)
 
-for _, player in pairs(Players:GetPlayers()) do
+for _, player in ipairs(Players:GetPlayers()) do
     if player ~= LocalPlayer then
         if BoxESPEnabled then CreateBoxESP(player) end
         if HealthESPEnabled then CreateHealthBar(player) end
-        if player.Character then OnCharacterAdded(player.Character) end
+        local character = GetCharacter(player)
+        if character then OnCharacterAdded(character) end
         player.CharacterAdded:Connect(OnCharacterAdded)
     end
 end
 
--- update loops
+-- Update Loops
 local LastESPUpdate = 0
 local ESPUpdateInterval = 0.1
 
 RunService.Heartbeat:Connect(function()
-    if HighlightEnabled then
-        local currentTime = tick()
-        if currentTime - LastESPUpdate >= ESPUpdateInterval then
-            UpdateAllHighlights()
-            LastESPUpdate = currentTime
-        end
+    if not HighlightEnabled then return end
+    
+    local currentTime = tick()
+    if currentTime - LastESPUpdate >= ESPUpdateInterval then
+        UpdateAllHighlights()
+        LastESPUpdate = currentTime
     end
 end)
 
@@ -530,7 +768,7 @@ RunService.RenderStepped:Connect(function()
     
     for player, box in pairs(BoxESPs) do
         if player and player.Parent then
-            local isTeammate = TeamCheckEnabled and LocalPlayer.Team and player.Team and player.Team == LocalPlayer.Team
+            local isTeammate = TeamCheckEnabled and IsTeammate(player)
             if isTeammate then
                 for _, line in pairs(box) do line.Visible = false end
             else
@@ -543,7 +781,7 @@ RunService.RenderStepped:Connect(function()
     
     for player, healthBar in pairs(HealthBars) do
         if player and player.Parent then
-            local isTeammate = TeamCheckEnabled and LocalPlayer.Team and player.Team and player.Team == LocalPlayer.Team
+            local isTeammate = TeamCheckEnabled and IsTeammate(player)
             if isTeammate then
                 healthBar.Outline.Visible = false
                 healthBar.Bar.Visible = false
@@ -557,5 +795,5 @@ RunService.RenderStepped:Connect(function()
     end
 end)
 
-local Time = (string.format("%."..tostring(Decimals).."f", os.clock() - Clock))
-library:SendNotification(("Loaded In "..tostring(Time)), 6)
+local Time = string.format("%." .. tostring(Decimals) .. "f", os.clock() - Clock)
+library:SendNotification("Loaded In " .. tostring(Time) .. "s", 6)
