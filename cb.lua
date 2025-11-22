@@ -30,8 +30,9 @@ local Mouse = LocalPlayer:GetMouse()
 -- Combat Tab
 local CombatSection = Tab1:AddSection("Combat", 1)
 
--- Shared Team Check Variable
+-- Shared Combat Variables
 local CombatTeamCheck = false
+local CombatClosestPart = false
 
 -- Triggerbot Variables
 local TriggerbotEnabled = false
@@ -44,13 +45,13 @@ local AimbotEnabled = false
 local AimbotFOV = 150
 local AimbotSmoothing = 50
 local ShowFOVCircle = false
-local AimbotClosestPart = false
 local FOVCircle = nil
 
 -- Silent Aim Variables
 local SilentAimEnabled = false
 local SilentAimFOV = 100
-local SilentAimClosestPart = false
+local SilentAimTarget = nil
+local SilentAimHitChance = 100
 
 -- Utility Functions
 local function GetCharacter(player)
@@ -79,6 +80,7 @@ local function GetClosestPartToMouse(character)
     
     local closestPart = nil
     local shortestDistance = math.huge
+    local mousePos = Vector2.new(Mouse.X, Mouse.Y)
     
     local parts = {"Head", "UpperTorso", "LowerTorso", "HumanoidRootPart"}
     
@@ -87,7 +89,6 @@ local function GetClosestPartToMouse(character)
         if part then
             local screenPos, onScreen = Camera:WorldToViewportPoint(part.Position)
             if onScreen then
-                local mousePos = Vector2.new(Mouse.X, Mouse.Y)
                 local distance = (Vector2.new(screenPos.X, screenPos.Y) - mousePos).Magnitude
                 
                 if distance < shortestDistance then
@@ -164,7 +165,7 @@ RunService.RenderStepped:Connect(function()
     end
 end)
 
--- Shared Team Check Toggle (at the top)
+-- Shared Combat Toggles
 CombatSection:AddToggle({
     text = "Team Check",
     state = false,
@@ -173,6 +174,17 @@ CombatSection:AddToggle({
     risky = false,
     callback = function(v)
         CombatTeamCheck = v
+    end
+})
+
+CombatSection:AddToggle({
+    text = "Closest Part",
+    state = false,
+    tooltip = "Target closest visible part instead of head (applies to aimbot & silent aim)",
+    flag = "Combat_ClosestPart",
+    risky = false,
+    callback = function(v)
+        CombatClosestPart = v
     end
 })
 
@@ -217,8 +229,8 @@ TriggerbotToggle:AddBind({
     bind = "None",
     flag = "Triggerbot_Toggle",
     callback = function(v)
-        TriggerbotEnabled = not TriggerbotEnabled
-        TriggerbotToggle:SetState(TriggerbotEnabled)
+        TriggerbotEnabled = v
+        TriggerbotToggle:SetState(v)
     end
 })
 
@@ -281,22 +293,11 @@ AimbotToggle:AddBind({
     bind = "None",
     flag = "Aimbot_Toggle",
     callback = function(v)
-        AimbotEnabled = not AimbotEnabled
-        AimbotToggle:SetState(AimbotEnabled)
+        AimbotEnabled = v
+        AimbotToggle:SetState(v)
         if FOVCircle then
             FOVCircle.Visible = ShowFOVCircle and AimbotEnabled
         end
-    end
-})
-
-CombatSection:AddToggle({
-    text = "Target Closest Part",
-    state = false,
-    tooltip = "Aim at closest visible part instead of head",
-    flag = "Aimbot_ClosestPart",
-    risky = false,
-    callback = function(v)
-        AimbotClosestPart = v
     end
 })
 
@@ -353,7 +354,7 @@ CombatSection:AddSlider({
 local AimbotConnection = RunService.RenderStepped:Connect(function()
     if not AimbotEnabled then return end
     
-    local target = GetClosestPlayerInFOV(AimbotFOV, CombatTeamCheck, AimbotClosestPart)
+    local target = GetClosestPlayerInFOV(AimbotFOV, CombatTeamCheck, CombatClosestPart)
     
     if target and target.part then
         local targetPos = target.part.Position
@@ -369,10 +370,10 @@ end)
 -- Silent Aim Section
 CombatSection:AddSeparator({enabled = true, text = "Silent Aim"})
 
-CombatSection:AddToggle({
+local SilentAimToggle = CombatSection:AddToggle({
     text = "Silent Aim",
     state = false,
-    tooltip = "Automatic hit registration",
+    tooltip = "Automatic hit registration without moving camera",
     flag = "SilentAim_Enabled",
     risky = true,
     callback = function(v)
@@ -380,14 +381,16 @@ CombatSection:AddToggle({
     end
 })
 
-CombatSection:AddToggle({
-    text = "Target Closest Part",
-    state = false,
-    tooltip = "Target closest visible part instead of head",
-    flag = "SilentAim_ClosestPart",
-    risky = false,
+SilentAimToggle:AddBind({
+    enabled = true,
+    text = "Silent Aim",
+    tooltip = "Key to toggle silent aim",
+    mode = "toggle",
+    bind = "None",
+    flag = "SilentAim_Toggle",
     callback = function(v)
-        SilentAimClosestPart = v
+        SilentAimEnabled = v
+        SilentAimToggle:SetState(v)
     end
 })
 
@@ -406,6 +409,55 @@ CombatSection:AddSlider({
         SilentAimFOV = v
     end
 })
+
+CombatSection:AddSlider({
+    enabled = true,
+    text = "Hit Chance",
+    tooltip = "Percentage chance to hit target (100 = always hit)",
+    flag = "SilentAim_HitChance",
+    suffix = "%",
+    dragging = true,
+    min = 0,
+    max = 100,
+    increment = 5,
+    risky = false,
+    callback = function(v)
+        SilentAimHitChance = v
+    end
+})
+
+-- Update Silent Aim Target Loop
+RunService.RenderStepped:Connect(function()
+    if not SilentAimEnabled then
+        SilentAimTarget = nil
+        return
+    end
+    
+    local target = GetClosestPlayerInFOV(SilentAimFOV, CombatTeamCheck, CombatClosestPart)
+    SilentAimTarget = target
+end)
+
+-- Hook __namecall for FindPartOnRayWithIgnoreList
+local OldNamecall
+OldNamecall = hookmetamethod(game, "__namecall", newcclosure(function(Self, ...)
+    local Args = {...}
+    local Method = getnamecallmethod()
+    
+    -- Check if silent aim should apply
+    if SilentAimEnabled and SilentAimTarget and math.random(1, 100) <= SilentAimHitChance then
+        local targetPart = SilentAimTarget.part
+        
+        -- Hook FindPartOnRayWithIgnoreList
+        if Self == Workspace and Method == "FindPartOnRayWithIgnoreList" then
+            -- Modify the ray to point at the target
+            local originalRay = Args[1]
+            Args[1] = Ray.new(originalRay.Origin, targetPart.Position - originalRay.Origin)
+            return OldNamecall(Self, unpack(Args))
+        end
+    end
+    
+    return OldNamecall(Self, ...)
+end))
 
 -- Visuals Tab
 local VisualsSection = VisualsTab:AddSection("ESP Settings", 1)
